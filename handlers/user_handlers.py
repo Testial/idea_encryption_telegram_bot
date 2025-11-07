@@ -1,4 +1,5 @@
 import io
+import base64
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
 from aiogram.types.input_file import BufferedInputFile
@@ -7,7 +8,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from lexicon.lexicon import LEXICON_RU
 from data import Data
-from keyboards.keyboards import mode_keyboard, padding_keyboard
+from keyboards.keyboards import mode_keyboard, padding_keyboard, format_keyboard
 from services.services import generate_key_iv, run_encrypt
 
 router = Router()
@@ -22,8 +23,9 @@ class FSMFillForm(StatesGroup):
 @router.message(Command(commands='start'))
 async def process_start_command(message: Message):
     await message.answer(text=LEXICON_RU['/start'])
+    # Initialize user storage with sensible defaults
     if message.from_user.id not in data.users.keys():
-        data.users[message.from_user.id] = {}
+        data.users[message.from_user.id] = {'format': 'base64'}
 
 
 @router.message(Command(commands='help'))
@@ -42,6 +44,15 @@ async def process_padding_command(message: Message):
     await message.answer(
         text=LEXICON_RU['choose_padding'],
         reply_markup=padding_keyboard
+    )
+
+@router.message(Command(commands='format'))
+async def process_format_command(message: Message):
+    if message.from_user.id not in data.users.keys():
+        data.users[message.from_user.id] = {'format': 'base64'}
+    await message.answer(
+        text=LEXICON_RU['choose_format'],
+        reply_markup=format_keyboard
     )
 
 @router.message(Command(commands='encrypt'))
@@ -87,6 +98,19 @@ async def process_padding_inline_button_pressed(callback: CallbackQuery):
     await callback.answer()
 
 
+@router.callback_query(F.data.in_(['format base64', 'format binary file']))
+async def process_format_inline_button_pressed(callback: CallbackQuery):
+    fmt: str = str(callback.data)[7:]
+    await callback.message.edit_text(
+        text=f"{LEXICON_RU['format_chosen']} {fmt}",
+        reply_markup=callback.message.reply_markup
+    )
+    if callback.from_user.id not in data.users:
+        data.users[callback.from_user.id] = {}
+    data.users[callback.from_user.id]['format'] = fmt
+    await callback.answer()
+
+
 @router.message(StateFilter(FSMFillForm.wait_for_password_encrypt))
 async def process_password_sent(message: Message, state: FSMContext):
     pw = message.text
@@ -114,13 +138,16 @@ async def process_data_to_encrypt_sent(message: Message, state: FSMContext):
     padding = data.users[message.from_user.id]['padding']
     encrypted_bytes: bytes = run_encrypt(str_to_encrypt, key, iv, 'encrypt', mode, padding)
 
-    # Создаем объект BytesIO для передачи данных в память
-    file_in_memory = io.BytesIO(encrypted_bytes)
-    file_in_memory.name = 'result.bin'  # Указываем имя файла (не обязательно, но полезно)
-
-    # Отправляем файл как документ
-    document = BufferedInputFile(file_in_memory.getvalue(), "result.bin")
-    await message.answer_document(document)
+    # Determine output format
+    fmt = data.users.get(message.from_user.id, {}).get('format', 'base64')
+    if fmt == 'base64':
+        b64 = base64.b64encode(encrypted_bytes).decode('ascii')
+        await message.answer(text=b64)
+    else:
+        file_in_memory = io.BytesIO(encrypted_bytes)
+        file_in_memory.name = 'result.bin'
+        document = BufferedInputFile(file_in_memory.getvalue(), "result.bin")
+        await message.answer_document(document)
     await state.clear()
 
 
@@ -131,15 +158,33 @@ async def process_data_to_decrypt_sent(message: Message, state: FSMContext, bot)
     mode = data.users[message.from_user.id]['mode']
     padding = data.users[message.from_user.id]['padding']
 
-    file_id = message.document.file_id
-    file = await bot.get_file(file_id)
-    file_path = file.file_path
+    # Accept either a binary file (document) or a base64 text
+    bytes_to_decrypt = None
+    if message.document:
+        file_id = message.document.file_id
+        file = await bot.get_file(file_id)
+        file_path = file.file_path
+        file_bytes = await bot.download_file(file_path)
+        bytes_to_decrypt = file_bytes.getvalue()
+    elif message.text:
+        # assume base64 text
+        text = message.text.strip()
+        try:
+            bytes_to_decrypt = base64.b64decode(text)
+        except Exception:
+            await message.answer(text='Не удалось декодировать base64. Убедитесь, что вы отправили правильный base64-текст или файл.')
+            await state.clear()
+            return
+    else:
+        await message.answer(text=LEXICON_RU['ask_decrypt'])
+        return
 
-    # Загружаем содержимое файла в байты
-    file_bytes = await bot.download_file(file_path) # _io.BytesIO
-    bytes_to_decrypt = file_bytes.getvalue()
-
-    decrypted_str: str = run_encrypt(bytes_to_decrypt, key, iv, 'decrypt', mode, padding)
+    try:
+        decrypted_str: str = run_encrypt(bytes_to_decrypt, key, iv, 'decrypt', mode, padding)
+    except Exception:
+        await message.answer(text=f'Ошибка при расшифровке.')
+        await state.clear()
+        return
 
     await state.clear()
     await message.answer(text=decrypted_str)

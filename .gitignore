@@ -4,4 +4,5 @@ result.bin
 .mypy_cache/
 .vscode/
 venv/
+.venv/
 __pycache__/

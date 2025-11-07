@@ -60,3 +60,17 @@ padding_keyboard = InlineKeyboardMarkup(
                      [padding_button_3],
                      [padding_button_4]]
 )
+
+format_button_1 = InlineKeyboardButton(
+    text='base64',
+    callback_data='format base64'
+)
+
+format_button_2 = InlineKeyboardButton(
+    text='binary file',
+    callback_data='format binary file'
+)
+
+format_keyboard = InlineKeyboardMarkup(
+    inline_keyboard=[[format_button_1], [format_button_2]]
+)
